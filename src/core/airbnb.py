@@ -4,11 +4,14 @@ from pydantic import BaseModel
 from typing import List, Optional
 import re
 import time
-from src.core.llm import get_response
+from src.core.llm import get_response, DEFAULT_FIREWORKS_MODEL
 
 FILTER_PROMPT = """
-From the following list of listings, return the listing/room ID that match the following criteria:
-The listing must be for a one bedroom apartment. Not a studio. Not a room in a shared housing.
+From the following list of listings, return a list of listing/room IDs that match the following criteria:
+The listing could likely be a one bedroom apartment. Exclude any listing that is obviously a studio. Exclude any listing that is obviously a room in a shared housing.
+
+If you are unsure, include the listing.
+Be very concise in your reasoning. Do not overthink it.
 
 Listings:
 {listings}
@@ -22,6 +25,15 @@ class Listing(BaseModel):
     price: str
     rating: str
     picture: str
+
+    def to_telegram_format(self) -> str:
+        return (
+            f"🏠 <b>{self.title}</b>\n"
+            f"📍 {self.description}\n"
+            f"💰 {self.price}\n"
+            f"⭐ {self.rating}\n"
+            f"🔗 <a href='{self.link}'>View Listing</a>"
+        )
 
 
 class ListingIdResponse(BaseModel):
@@ -136,7 +148,7 @@ def extract_page_listings(page) -> List[Listing]:
     return listings
 
 
-def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_price: int, max_pages: int, retries: int = 3) -> List[Listing]:
+def search_listings(location: str, move_in_date: str, move_out_date: str, max_price: int, max_pages: int, retries: int = 3) -> List[Listing]:
     last_exception = None
     
     for attempt in range(1, retries + 1):
@@ -150,14 +162,31 @@ def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_pric
                 )
                 page = browser.new_page()
                 page.goto("https://www.airbnb.ae/")
+                
+                # --- NEW: Handle "One price" disclosure popup ---
+                # It usually appears on load. We try to find the "Got it" button.
+                try:
+                    # Short timeout because it might not be there
+                    got_it_btn = page.get_by_role("button", name="Got it")
+                    if got_it_btn.is_visible(timeout=5000):
+                        got_it_btn.click()
+                        print("Closed 'One price' popup.")
+                except Exception:
+                    pass # verify if this is needed or if is_visible handles it gracefully
 
                 # 1. Type LOCATION into the destination field
-                page.get_by_test_id("structured-search-input-field-query").fill(location)
+                # Click first to ensuring focus, then clear and type
+                search_input = page.get_by_test_id("structured-search-input-field-query")
+                search_input.click(force=True)
+                search_input.fill(location)
 
                 # 2. Click the suggestion for "LOCATION, United Arab Emirates"
-                page.get_by_test_id("option-0").click()
+                # Wait for suggestion to appear
+                suggestion = page.get_by_test_id("option-0")
+                suggestion.wait_for(state="visible", timeout=5000)
+                suggestion.click()
 
-                # 3. Open the date picker/check-in field if not already open (usually typing location opens it, but clicking suggestion might auto-advance)
+                # 3. Open the date picker/check-in field if not already open
                 # The logic above clicks the option which usually advances to dates.
                 
                 # Parse Dates
@@ -176,35 +205,71 @@ def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_pric
 
                 # 4. Navigate to Check-in Month
                 # We need to find the "Next" button and click until we see the target month/year
-                # Using a while loop is safer than hardcoding clicks.
                 
-                # Wait for the date picker to be visible just in case
-                # Ideally we'd look for the calendar container, but looking for the next button is a good proxy.
+                # Wait for the date picker container or header to ensure it's open
+                # If clicking suggestion didn't open it, we might need to click "Check in"
+                try:
+                    page.get_by_test_id("structured-search-input-field-split-dates-0").click(timeout=2000)
+                except:
+                    pass # It might already be open
+
                 next_month_button = page.locator('button[aria-label="Move forward to switch to the next month."]')
                 
-                # We might need to ensure the calendar is open.
-                # If the previous step worked, we are likely in the "Check in" tab.
-                
+                # Loop to find Check-In Month
+                # Add a safe breaker to avoid infinite loops
+                max_clicks = 24 
+                clicks = 0
                 while not page.get_by_role("heading", name=check_in_month_str).is_visible():
+                    if clicks > max_clicks:
+                        raise Exception(f"Could not find check-in month {check_in_month_str}")
                     next_month_button.click()
+                    clicks += 1
                 
                 # Select Check-in Day
-                # Locator matching partial label for robustness. Element is a button.
-                # e.g. aria-label="19, ... January 2026"
-                page.locator(f'button[aria-label*="{check_in_day_str}"][aria-label*="{check_in_month_str}"]').click()
+                # Use ^= to match start of string "1, ..." avoiding "11," or "21," matches
+                page.locator(f'button[aria-label^="{check_in_day_str}"][aria-label*="{check_in_month_str}"]').click()
 
                 # 5. Navigate to Check-out Month
+                clicks = 0
                 while not page.get_by_role("heading", name=check_out_month_str).is_visible():
+                    if clicks > max_clicks:
+                        raise Exception(f"Could not find check-out month {check_out_month_str}")
                     next_month_button.click()
+                    clicks += 1
 
                 # Select Check-out Day
-                page.locator(f'button[aria-label*="{check_out_day_str}"][aria-label*="{check_out_month_str}"]').click()
+                page.locator(f'button[aria-label^="{check_out_day_str}"][aria-label*="{check_out_month_str}"]').click()
 
                 # 6. Click Search
-                page.get_by_test_id("structured-search-input-search-button").click()
+                # Ensure we are at the top where the search bar usually is
+                page.evaluate("window.scrollTo(0, 0)")
+                search_btn = page.get_by_test_id("structured-search-input-search-button").first
+                search_btn.wait_for(state="visible", timeout=5000)
+                search_btn.click()
 
                 # Wait for results to load
                 page.wait_for_selector('[data-testid="category-bar-filter-button"]')
+
+                # --- NEW: Handle "One price" popup after search ---
+                try:
+                    # Look for the popup and click "Got it" or similar.
+                    # Text: "Now you’ll see one price for your trip, all fees included."
+                    # Button usually says "Got it" or "OK"
+                    popup_btn = page.get_by_role("button", name="Got it")
+                    if popup_btn.is_visible(timeout=3000):
+                        popup_btn.click()
+                        print("Closed 'One price' post-search popup.")
+                    else:
+                         # Sometimes it might be a different button or just a close X
+                         close_btn = page.get_by_label("Close")
+                         if close_btn.is_visible(timeout=1000):
+                             # Ensure we are closing a modal, not something else. 
+                             # This is risky but often necessary. Check if modal is present.
+                             if page.locator('[data-testid="modal-container"]').is_visible():
+                                 close_btn.first.click()
+                                 print("Closed modal via Close button.")
+                except Exception:
+                    pass
 
                 # 7. Open Filters
                 page.get_by_test_id("category-bar-filter-button").click()
@@ -221,7 +286,7 @@ def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_pric
                 # We need to clear it first or just fill it.
                 price_input = page.locator("#price_filter_max")
                 # Ensure existing text is cleared or just use fill which usually overwrites
-                price_input.fill(max_price)
+                price_input.fill(str(max_price)) # ensure string
 
                 # 11. Click "Show ... homes"
                 # This button text is dynamic (e.g. "Show 123 homes"), so we match partially
@@ -245,7 +310,8 @@ def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_pric
                     next_button = page.locator('a[aria-label="Next"]')
                     
                     if next_button.is_visible():
-                        next_button.click()
+                        # Use JS click to bypass viewport/overlap issues completely
+                        next_button.evaluate("node => node.click()")
                         # Wait for the next page to load. 
                         # Ideally wait for the page number or listings to update.
                         # A simple timeout is robust enough for this demo, or we can wait for net idle
@@ -294,4 +360,157 @@ def filter_listings(listings: List[Listing]) -> List[Listing]:
     except Exception as e:
         print(f"Error filtering listings: {e}")
         return []
+
+class LocationVerification(BaseModel):
+    is_match: bool
+    reason: str
+
+class AestheticVerification(BaseModel):
+    is_aesthetic: bool
+    reason: str
+
+def verify_listing(listing: Listing, required_location: str) -> bool:
+    print(f"Verifying listing: {listing.title} ({listing.id})")
     
+    # Using the user-preferred alias for Gemini 3
+    VISION_MODEL = "accounts/fireworks/models/qwen3-vl-235b-a22b-thinking"
+    
+    scraped_location = "N/A"
+    image_urls = []
+
+    try:
+        with sync_playwright() as playwright:
+            browser = playwright.chromium.launch_persistent_context(
+                user_data_dir="./playwright_user_data",
+                headless=False,
+                no_viewport=True,
+            )
+            page = browser.new_page()
+            
+            print(f"Navigating to {listing.link}...")
+            page.goto(listing.link)
+            
+            # Close "One price" popup if present
+            try:
+                page.get_by_role("button", name="Got it").click(timeout=3000)
+                print("Closed popup.")
+            except:
+                pass
+                
+            page.wait_for_load_state("domcontentloaded")
+            
+            # 1. Scrape Location
+            # Attempt to find "Where you'll be" section text
+            # This is often under a specific heading
+            try:
+                # Find the heading "Where you'll be" and get the text following it
+                # We can grab the whole text content of the location section if possible
+                # Simple approach: Search for the text "Where you'll be" and grab surrounding text
+                # Or just grab the main address header often found at the top
+                
+                # Let's try to get the meta address first
+                # <meta property="og:title" content="..."> might contain location
+                
+                # Let's use the page text but focus on the "Where you'll be" area
+                # We can also look for the map container
+                
+                heading = page.get_by_role("heading", name="Where you'll be")
+                if heading.count() > 0:
+                    heading.scroll_into_view_if_needed()
+                    # Get the text of the container. 
+                    # Assuming some structure, but safely just grabbing a chunk of text around it?
+                    # Let's grab the 1000 characters after the heading appears in the inner_text?
+                    # Getting parent text is better.
+                    # locator("..") from heading
+                    loc_container = heading.locator("xpath=..")
+                    scraped_location = loc_container.inner_text()
+                else:
+                    # Fallback to body text truncated
+                    scraped_location = page.inner_text("body")[:5000]
+                    
+            except Exception as e:
+                print(f"Error scraping precise location: {e}")
+                scraped_location = page.inner_text("body")[:5000]
+
+            # 2. Scrape Images
+            # Get images from the photo grid
+            images = page.locator('[data-testid="photo-grid-picture"] img').all()
+            if not images:
+                # Fallback to all images
+                images = page.locator("img").all()
+            
+            count = 0
+            for img in images:
+                src = img.get_attribute("src")
+                if src and "im/pictures" in src:
+                    if src not in image_urls:
+                        image_urls.append(src)
+                        count += 1
+                if count >= 10: 
+                    break
+            
+            print(f"Scraped {len(image_urls)} images.")
+            
+    except Exception as e:
+        print(f"Error scraping listing: {e}")
+        return False
+
+    # 3. Verify Location with LLM
+    print("Verifying location...")
+    location_prompt = f"""
+    The user is looking for a listing in "{required_location}".
+    I have scraped the following text from the listing page (specifically looking for 'Where you'll be' or address data):
+    
+    ---
+    {scraped_location[:5000]}
+    ---
+    
+    Does this listing appear to be in {required_location}? 
+    Be strict about the city/area. If the text says "Dubai" and user wants "Dubai", it's a match.
+    """
+    
+    try:
+        # Use default model (Gemini) for text reasoning
+        loc_resp = get_response(location_prompt, LocationVerification)
+        if not loc_resp.is_match:
+            print(f"Location mismatch: {loc_resp.reason}")
+            return False
+        print(f"Location match: {loc_resp.reason}")
+    except Exception as e:
+        print(f"Error calling LLM for location: {e}")
+        return False
+
+    # 4. Verify Aesthetics with Vision LLM
+    print("Verifying aesthetics...")
+    if not image_urls:
+        print("No images found to verify.")
+        return False
+        
+    # Construct Multimodal Prompt
+    content_parts = []
+    content_parts.append({"type": "text", "text": "Does this listing look minimalist, clean, bright, and aesthetic? Analyze the interior design, clutter, and color palette. Be strict."})
+    
+    for url in image_urls:
+         content_parts.append({"type": "image_url", "image_url": {"url": url}})
+         
+    try:
+        vision_resp = get_response(
+            content_parts, 
+            AestheticVerification, 
+            model=VISION_MODEL
+        )
+        
+        if vision_resp.is_aesthetic:
+            print(f"Aesthetic verification passed: {vision_resp.reason}")
+            return True
+        else:
+            print(f"Aesthetic verification failed: {vision_resp.reason}")
+            return False
+            
+    except Exception as e:
+        print(f"Error calling Vision LLM: {e}")
+        return False
+
+
+def verify_listings(listings: List[Listing], required_location: str) -> List[Listing]:
+    return [listing for listing in listings if verify_listing(listing, required_location)]

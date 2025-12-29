@@ -8,4 +8,6 @@ dependencies = [
     "instructor>=1.13.0",
     "playwright>=1.57.0",
     "pydantic>=2.12.5",
+    "python-dotenv>=1.2.1",
+    "requests>=2.32.5",
 ]
