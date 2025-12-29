@@ -4,14 +4,29 @@ from pydantic import BaseModel
 from typing import List, Optional
 import re
 import time
+from src.core.llm import get_response
+
+FILTER_PROMPT = """
+From the following list of listings, return the listing/room ID that match the following criteria:
+The listing must be for a one bedroom apartment. Not a studio. Not a room in a shared housing.
+
+Listings:
+{listings}
+"""
 
 class Listing(BaseModel):
+    id: str
     title: str
     description: str
     link: str
     price: str
     rating: str
     picture: str
+
+
+class ListingIdResponse(BaseModel):
+    ids: List[str]
+
 
 def extract_page_listings(page) -> List[Listing]:
     listings = []
@@ -61,12 +76,20 @@ def extract_page_listings(page) -> List[Listing]:
             if not full_description:
                  full_description = "N/A"
 
+
             # 3. Extract Link
             # The card itself is usually wrapped in a link or has a main link
             link_el = card.locator("a").first
             link = link_el.get_attribute("href") if link_el.count() > 0 else "N/A"
             if link != "N/A" and not link.startswith("http"):
                 link = "https://www.airbnb.ae" + link
+            
+            # Extract ID from link
+            listing_id = "N/A"
+            if link != "N/A":
+                match = re.search(r'/rooms/(\d+)', link)
+                if match:
+                    listing_id = match.group(1)
 
             # 4. Extract Price
             price_el = card.locator('[data-testid="price-availability-row"]')
@@ -97,6 +120,7 @@ def extract_page_listings(page) -> List[Listing]:
             picture = img_el.get_attribute("src") if img_el.count() > 0 else "N/A"
 
             listings.append(Listing(
+                id=listing_id,
                 title=title,
                 description=full_description,
                 link=link,
@@ -245,3 +269,29 @@ def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_pric
     if last_exception:
         raise last_exception
     return []
+
+
+def filter_listings(listings: List[Listing]) -> List[Listing]:
+    # Format listings for the prompt
+    listings_text = ""
+    for l in listings:
+        listings_text += f"\n- ID: {l.id}\n  Title: {l.title}\n  Description: {l.description}\n  Price: {l.price}\n"
+        
+    prompt = FILTER_PROMPT.format(listings=listings_text)
+    
+    try:
+        response = get_response(prompt, ListingIdResponse)
+        
+        # Filter the original list based on returned IDs
+        filtered_listings = [l for l in listings if l.id in response.ids]
+        
+        # Log if some IDs were not found (optional, for debugging)
+        if len(response.ids) != len(filtered_listings):
+            print(f"Note: LLM returned definitions for {len(response.ids)} IDs, but only {len(filtered_listings)} were matched.")
+
+        return filtered_listings
+        
+    except Exception as e:
+        print(f"Error filtering listings: {e}")
+        return []
+    
