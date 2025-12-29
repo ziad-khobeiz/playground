@@ -4,4 +4,6 @@ version = "0.1.0"
 description = "Playground for experiments & projects"
 readme = "README.md"
 requires-python = ">=3.12"
-dependencies = []
+dependencies = [
+    "playwright>=1.57.0",
+]
