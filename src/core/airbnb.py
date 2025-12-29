@@ -1,9 +1,19 @@
 from playwright.sync_api import sync_playwright
 from datetime import datetime
+from pydantic import BaseModel
+from typing import List, Optional
 import re
 import time
 
-def extract_page_listings(page):
+class Listing(BaseModel):
+    title: str
+    description: str
+    link: str
+    price: str
+    rating: str
+    picture: str
+
+def extract_page_listings(page) -> List[Listing]:
     listings = []
     # Wait for at least one card to be present
     page.wait_for_selector('[data-testid="card-container"]')
@@ -86,14 +96,14 @@ def extract_page_listings(page):
             img_el = card.locator("img").first
             picture = img_el.get_attribute("src") if img_el.count() > 0 else "N/A"
 
-            listings.append({
-                "Title": title,
-                "Description": full_description,
-                "Link": link,
-                "Price": price,
-                "Rating": rating,
-                "Picture": picture
-            })
+            listings.append(Listing(
+                title=title,
+                description=full_description,
+                link=link,
+                price=price,
+                rating=rating,
+                picture=picture
+            ))
             
         except Exception as e:
             print(f"Error extracting card {i}: {e}")
@@ -102,7 +112,7 @@ def extract_page_listings(page):
     return listings
 
 
-def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_price: int, max_pages: int, retries: int = 3):
+def search_airbnb(location: str, move_in_date: str, move_out_date: str, max_price: int, max_pages: int, retries: int = 3) -> List[Listing]:
     last_exception = None
     
     for attempt in range(1, retries + 1):
