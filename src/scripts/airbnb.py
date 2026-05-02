@@ -1,9 +1,9 @@
 from src.core.airbnb import filter_listings, search_listings, verify_listings
 
-MOVE_IN_DATE = "19-01-2026"
-MOVE_OUT_DATE = "19-04-2026"
-LOCATION = "Business Bay"
-MAX_PRICE = "13000" # AED
+MOVE_IN_DATE = "30-05-2026"
+MOVE_OUT_DATE = "18-07-2026"
+LOCATION = "Downtown Dubai"
+MAX_PRICE = "8500" # AED
 MAX_PAGES = 30
 
 
