@@ -372,8 +372,7 @@ class AestheticVerification(BaseModel):
 def verify_listing(listing: Listing, required_location: str) -> bool:
     print(f"Verifying listing: {listing.title} ({listing.id})")
     
-    # Using the user-preferred alias for Gemini 3
-    VISION_MODEL = "accounts/fireworks/models/qwen3-vl-235b-a22b-thinking"
+    VISION_MODEL = "google/gemini-3.1-pro-preview"
     
     scraped_location = "N/A"
     image_urls = []
