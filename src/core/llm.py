@@ -25,7 +25,7 @@ JSON_OPENROUTER_CLIENT = instructor.from_openai(
 )
 
 DEFAULT_FIREWORKS_MODEL = "accounts/fireworks/models/glm-4p7"
-DEFAULT_OPENROUTER_MODEL = "google/gemini-3-pro-preview"
+DEFAULT_OPENROUTER_MODEL = "google/gemini-3.1-pro-preview"
 
 # TypedDicts for strict typing
 class TextContent(TypedDict):
